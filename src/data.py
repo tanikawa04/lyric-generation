@@ -11,6 +11,10 @@ def load(dir_path):
     return data
 
 
+# BucketBatchSampler のコードは Pytorch-NLP を参考にした
+# https://pytorchnlp.readthedocs.io/en/latest/source/torchnlp.samplers.html#torchnlp.samplers.BucketBatchSampler
+# https://pytorchnlp.readthedocs.io/en/latest/_modules/torchnlp/samplers/bucket_batch_sampler.html
+
 class SortedSampler(Sampler):
     def __init__(self, data, sort_key=lambda x: x):
         super().__init__(data)
@@ -31,7 +35,9 @@ class BucketSampler(Sampler):
     def __init__(self,
                  data_source,
                  bucket_size,
+                 batch_size,
                  sort_key=lambda x: x,):
+        self.batch_size = batch_size
         self.sort_key = sort_key
         self.n_data = len(data_source)
         self.bucket_sampler = BatchSampler(RandomSampler(data_source),
@@ -40,8 +46,23 @@ class BucketSampler(Sampler):
     def __iter__(self):
         for bucket in self.bucket_sampler:
             sorted_sampler = SortedSampler(bucket, self.sort_key)
-            for i in sorted_sampler:
-                yield bucket[i]
+            batches = list(BatchSampler(sorted_sampler, self.batch_size, False))
+            # すべての batch の要素数が揃っている場合はそのまま
+            if len(batches[0]) == len(batches[-1]):
+                for batch in SubsetRandomSampler(batches):
+                    for i in batch:
+                        yield bucket[i]
+            # 最後の batch だけ数が少ない場合は、シャッフルしたときにずれてしまうので、
+            # 仕方なく退避させておく
+            # （本当は BucketBatchSampler の __iter__() を書き換えたいが、
+            #   ignite との兼ね合いがよくわからないので、ひとまずこの実装…。
+            #   ignite が BatchSampler しか受け付けないのが面倒）
+            else:
+                for batch in SubsetRandomSampler(batches[:-1]):
+                    for i in batch:
+                        yield bucket[i]
+                for i in batches[-1]:
+                    yield bucket[i]
 
     def __len__(self):
         return self.n_data
@@ -57,11 +78,11 @@ class BucketBatchSampler(BatchSampler):
         self.batch_size = batch_size
         self.drop_last = drop_last
         self.sampler = BucketSampler(
-            data_source, batch_size * bucket_size_multiplier, sort_key=sort_key)
+            data_source, batch_size * bucket_size_multiplier, batch_size, sort_key=sort_key)
 
 
 if __name__ == '__main__':
-    data = load('../data/tokenized')
+    data = load('../data/lyric/tensor/test')
     sampler = BucketBatchSampler(data, 8, False, sort_key=lambda i: len(data[i]), bucket_size_multiplier=100)
     for bucket in sampler:
         print([len(data[i]) for i in bucket])

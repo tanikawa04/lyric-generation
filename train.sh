@@ -11,14 +11,14 @@ case "$1" in
     --nlayers 5 \
     --nhead 8 \
     --clip 5.0 \
-    --epochs 5 \
+    --epochs 10 \
     --batch-size 16 \
     --bptt 64 \
     --dropout 0.1 \
     --seed 1111 \
     --cuda \
     --spm-path models/sp_8000.model \
-    --val-interval 5000 \
+    --val-interval 1000 \
     --log-interval 100 \
     --tb-log logs/lstmtransformer \
     --save models/lstmtransformer.pth
@@ -33,14 +33,14 @@ case "$1" in
     --nlayers 6 \
     --nhead 8 \
     --clip 5.0 \
-    --epochs 5 \
+    --epochs 10 \
     --batch-size 16 \
     --bptt 64 \
     --dropout 0.1 \
     --seed 1111 \
     --cuda \
     --spm-path models/sp_8000.model \
-    --val-interval 5000 \
+    --val-interval 1000 \
     --log-interval 100 \
     --save models/transformer.pth \
     --tb-log logs/transformer
@@ -54,14 +54,14 @@ case "$1" in
     --nhid 512 \
     --nlayers 3 \
     --clip 5.0 \
-    --epochs 5 \
-    --batch_size 16 \
+    --epochs 10 \
+    --batch-size 16 \
     --bptt 64 \
     --dropout 0.2 \
     --seed 1111 \
     --cuda \
     --spm-path models/sp_8000.model \
-    --val-interval 5000 \
+    --val-interval 1000 \
     --log-interval 100 \
     --save models/lstm.pth \
     --tb-log logs/lstm

@@ -51,8 +51,7 @@ class RNNModel(nn.Module):
         output, hidden = self.rnn(emb, hidden)
         output = self.drop(output)
         decoded = self.decoder(output)
-        decoded = decoded.view(-1, self.ntoken)
-        return F.log_softmax(decoded, dim=1), hidden
+        return F.log_softmax(decoded, dim=-1), hidden
 
     def init_hidden(self, bsz):
         weight = next(self.parameters())
@@ -254,7 +253,7 @@ class LSTMTransformerModel(nn.Module):
             device = src.device
             src_len = len(src)
             mem_len = len(mems[0]) if mems is not None else 0
-            if self.src_mask is None or self.src_mask.size(0) != src_len + mem_len:
+            if self.src_mask is None or self.src_mask.size(1) != src_len + mem_len:
                 mask = self._generate_square_subsequent_mask(src_len).to(device)
                 if mem_len > 0:
                     mem_mask = torch.zeros((src_len, mem_len)).to(device)
@@ -306,7 +305,7 @@ def repackage_hidden(h):
     if isinstance(h, torch.Tensor):
         return h.detach()
     else:
-        return tuple(repackage_hidden(v) for v in h)
+        return [repackage_hidden(v) for v in h]
 
 if __name__ == "__main__":
     # sample code

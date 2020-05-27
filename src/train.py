@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from ignite.engine import Engine, Events
+from ignite.metrics import Loss
 from data import load, BucketBatchSampler
 from model import RNNModel, TransformerModel, LSTMTransformerModel, TransformerLR, repackage_hidden
 from tokenizer import Tokenizer
@@ -60,7 +61,7 @@ def get_loader(data_dir, batch_size, padding_value=-1):
               help='SentencePiece model path')
 @click.option('--log-interval', type=int, default=200,
               help='report interval')
-@click.option('--val-interval', type=int, default=5000,
+@click.option('--val-interval', type=int, default=1000,
               help='validation interval')
 @click.option('--tb-log', type=str, default='logs',
               help='path to save tensorboard log')
@@ -80,6 +81,7 @@ def main(data_dir, model_type, emsize, nhid, nlayers, nhead, warm_up, step_size,
     ntokens = tokenizer.size()
     padding_index = tokenizer.to_id('<pad>')
     train_loader = get_loader(os.path.join(data_dir, 'train'), batch_size, padding_value=padding_index)
+    val_loader = get_loader(os.path.join(data_dir, 'val'), batch_size, padding_value=padding_index)
 
     if model_type == 'LSTMTransformer':
         model = LSTMTransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
@@ -90,63 +92,128 @@ def main(data_dir, model_type, emsize, nhid, nlayers, nhead, warm_up, step_size,
 
     optimizer = optim.Adam(model.parameters(), lr=1)
     scheduler = TransformerLR(optimizer, emsize, warmup_steps=warm_up, step_size=step_size)
+    criterion = nn.NLLLoss(ignore_index=padding_index)
 
-    def create_supervised_trainer(model, optimizer, device=None):
-        model_type = model.model_type if hasattr(model, 'model_type') else None
-        criterion = nn.NLLLoss(ignore_index=padding_index)
+    def _update(engine, batch):
+        model.train()
 
-        def _update(engine, batch):
-            model.train()
+        _batch = batch.to(device)
+        x, y = _batch[:-1], _batch[1:]
+        seq_length, batch_size = batch.size()
+
+        if model_type == 'LSTMTransformer':
+            hidden = model.init_hidden(batch_size)
+            mems = None
+        elif model_type == 'Transformer':
+            pass
+        else:
+            hidden = model.init_hidden(batch_size)
+
+        total_loss = 0
+        for i in range(0, seq_length - 1, bptt):
             optimizer.zero_grad()
-
-            _batch = batch.to(device)
-            data, targets = _batch[:-1], _batch[1:].view(-1)
-            batch_size = batch.size(1)
-
-            if model_type != 'Transformer':
-                hidden = model.init_hidden(batch_size)
-
+            _x, _y = x[i:i + bptt], y[i:i + bptt]
             if model_type == 'LSTMTransformer':
                 hidden = repackage_hidden(hidden)
-                output, hidden, _ = model(data, hidden)
-                output = output.view(-1, ntokens)
+                mems = repackage_hidden(mems) if mems else mems
+                output, hidden, mems = model(_x, hidden=hidden, mems=mems)
             elif model_type == 'Transformer':
-                output = model(data)
-                output = output.view(-1, ntokens)
+                output = model(_x)
             else:
                 hidden = repackage_hidden(hidden)
-                output, hidden = model(data, hidden)
+                output, hidden = model(_x, hidden)
 
-            loss = criterion(output, targets)
+            loss = criterion(output.view(-1, ntokens), _y.view(-1))
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
             optimizer.step()
+            scheduler.step()
+            total_loss += loss.item()
 
-            loss = loss.item()
-            ppl = math.exp(loss)
-            return {'loss': loss, 'ppl': ppl}
+        total_loss /= math.ceil((seq_length - 1) / bptt)
+        return {'loss': total_loss, 'ppl': math.exp(total_loss)}
 
-        trainer = Engine(_update)
-        return trainer
+    def _evaluate(engine, batch):
+        model.eval()
+
+        with torch.no_grad():
+            _batch = batch.to(device)
+            x, y = _batch[:-1], _batch[1:]
+            seq_length, batch_size = batch.size()
+
+            if model_type == 'LSTMTransformer':
+                hidden = model.init_hidden(batch_size)
+                mems = None
+            elif model_type == 'Transformer':
+                pass
+            else:
+                hidden = model.init_hidden(batch_size)
+
+            y_pred = None
+            for i in range(0, seq_length - 1, bptt):
+                optimizer.zero_grad()
+                _x, _y = x[i:i + bptt], y[i:i + bptt]
+                if model_type == 'LSTMTransformer':
+                    output, hidden, mems = model(_x, hidden=hidden, mems=mems)
+                elif model_type == 'Transformer':
+                    output = model(_x)
+                else:
+                    output, hidden = model(_x, hidden)
+
+                y_pred = output if y_pred is None else torch.cat([y_pred, output], dim=0)
+
+        return y_pred.view(-1, ntokens), y.view(-1)
 
     writer = SummaryWriter(log_dir=tb_log)
-    trainer = create_supervised_trainer(model, optimizer, device=device)
+    trainer = Engine(_update)
+    evaluator = Engine(_evaluate)
+    Loss(criterion).attach(evaluator, 'loss')
+
+    @trainer.on(Events.STARTED)
+    def assign_var(engine):
+        engine.state.min_val_loss = None
 
     @trainer.on(Events.ITERATION_COMPLETED(every=1))
-    def log_training_loss(engine):
+    def training_loss_tb(engine):
         writer.add_scalar('train/loss', engine.state.output['loss'], engine.state.iteration)
         writer.add_scalar('train/ppl', engine.state.output['ppl'], engine.state.iteration)
 
     @trainer.on(Events.ITERATION_COMPLETED(every=log_interval))
-    def print_training_loss(engine):
-        print('Epoch[{}] Iteration[{}/{}] Loss: {:.2f} PPL: {:.2f}'
+    def training_loss_print(engine):
+        print('Epoch[{}] Batch[{}/{}] Loss: {:.2f} PPL: {:.2f}'
               ''.format(engine.state.epoch, engine.state.iteration, len(train_loader),
                         engine.state.output['loss'], engine.state.output['ppl']))
 
     @trainer.on(Events.ITERATION_COMPLETED(every=val_interval))
-    def print_validation_results(engine):
-        loss, ppl = 0, 0
-        print('Validation Results - Epoch[{}] Loss: {:.2f} PPL: {:.2f}'
-              ''.format(engine.state.epoch, loss, ppl))
+    @trainer.on(Events.COMPLETED)
+    def validation(engine):
+        evaluator.run(val_loader)
+        loss = evaluator.state.metrics['loss']
+        ppl = math.exp(loss)
+        print('Validation - Epoch[{}] Batch[{}/{}] Loss: {:.2f} PPL: {:.2f} LR: {:02.5f}'
+              ''.format(engine.state.epoch, engine.state.iteration, len(train_loader),
+                        loss, ppl, scheduler.get_lr()[0]))
+        writer.add_scalar('val/loss', loss, engine.state.iteration)
+        writer.add_scalar('val/ppl', ppl, engine.state.iteration)
+
+        # save model if loss decreases
+        if engine.state.min_val_loss is None or loss < engine.state.min_val_loss:
+            torch.save(model, save_path)
+            engine.state.min_val_loss = loss
+
+    @trainer.on(Events.COMPLETED)
+    def test(engine):
+        nonlocal model
+        model = torch.load(save_path)
+        test_loader = get_loader(os.path.join(data_dir, 'test'), batch_size, padding_value=padding_index)
+        evaluator.run(test_loader)
+        loss = evaluator.state.metrics['loss']
+        ppl = math.exp(loss)
+        print('------------------------------------------------------------')
+        print('Test - Loss: {:.2f} PPL: {:.2f}'.format(loss, ppl))
+        print('------------------------------------------------------------')
+        writer.add_scalar('test/loss', loss, engine.state.iteration)
+        writer.add_scalar('test/ppl', ppl, engine.state.iteration)
 
     trainer.run(train_loader, max_epochs=epochs)
 
