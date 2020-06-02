@@ -3,7 +3,7 @@
 RAW_PATH=data/lyric/raw/
 PRETOKENIZED_PATH=data/lyric/pretokenized/
 VOCAB_SIZE=8000
-SPM_PREFIX=models/$VOCAB_SIZE
+SPM_PREFIX="models/sp_$VOCAB_SIZE"
 
 echo "Pre-tokenize corpus."
 python src/preprocess/pretokenize.py \
